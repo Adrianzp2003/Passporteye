@@ -1,4 +1,4 @@
-passporteye==2.3.0
+passporteye==2.2.2
 flask==2.3.2
 flask-cors==4.0.0
 Pillow==10.3.0
