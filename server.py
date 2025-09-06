@@ -6,7 +6,7 @@ import io
 from datetime import date
 
 app = Flask(__name__)
-CORS(app)  # limita luego a tu dominio si quieres
+CORS(app)  # luego limita origins a tu dominio si quieres
 
 @app.get("/health")
 def health():
@@ -15,9 +15,7 @@ def health():
 def normalize_date(yyMMdd):
     if not yyMMdd or len(yyMMdd) != 6:
         return None
-    yy = int(yyMMdd[:2])
-    mm = yyMMdd[2:4]
-    dd = yyMMdd[4:6]
+    yy = int(yyMMdd[:2]); mm = yyMMdd[2:4]; dd = yyMMdd[4:6]
     nowyy = date.today().year % 100
     century = 2000 if yy <= nowyy else 1900
     return f"{century+yy}-{mm}-{dd}"
@@ -49,9 +47,14 @@ def mrz():
 
     fixed = read_image_fix_orientation(f.read())
 
-    mrz = read_mrz(io.BytesIO(fixed), save_roi=True, extra_cmdline_params='--oem 3 --psm 6')
+    # Intento principal: Tesseract con OCRB
+    mrz = read_mrz(io.BytesIO(fixed), save_roi=True,
+                   extra_cmdline_params='--oem 3 --psm 6 -l ocrb')
     if mrz is None:
-        mrz = read_mrz(io.BytesIO(fixed), save_roi=True, force_rectify=True)
+        # Rectificación geométrica
+        mrz = read_mrz(io.BytesIO(fixed), save_roi=True,
+                       force_rectify=True,
+                       extra_cmdline_params='--oem 3 --psm 6 -l ocrb')
     if mrz is None:
         return jsonify({'ok': False, 'error': 'MRZ no detectada'}), 422
 
