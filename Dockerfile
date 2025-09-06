@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# 1) Paquetes del sistema + Tesseract
+# Tesseract + libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev \
     libglib2.0-0 libsm6 libxrender1 libxext6 libgl1 \
@@ -9,15 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 2) Dependencias Python (wheels precompiladas para evitar builds)
+# Python deps
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3) Código
+# App
 COPY server.py /app/server.py
 
-# 4) Modelo OCRB -> tessdata (imprescindible)
-#   Asegúrate de tener este fichero en tu repo: tess/ocrb.traineddata
+# Modelo OCRB (asegúrate de tener tess/ocrb.traineddata en el repo)
 COPY tess/ocrb.traineddata /usr/share/tesseract-ocr/4.00/tessdata/ocrb.traineddata
 RUN mkdir -p /usr/share/tesseract-ocr/5/tessdata && \
     cp /usr/share/tesseract-ocr/4.00/tessdata/ocrb.traineddata /usr/share/tesseract-ocr/5/tessdata/ocrb.traineddata
