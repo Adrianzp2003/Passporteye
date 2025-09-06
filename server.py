@@ -2,11 +2,28 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from passporteye import read_mrz
 from PIL import Image, ExifTags
-import io
 from datetime import date
+from functools import wraps
+import io, os
 
 app = Flask(__name__)
-CORS(app)  # luego limita origins a tu dominio si quieres
+
+# === AJUSTA los orígenes permitidos a tu dominio del PMS ===
+CORS(app, resources={r"/mrz": {"origins": [
+    "https://pmsopalmo.campingsopalmo.com",
+    "https://campingsopalmo.com"
+]}})
+
+# === API Key (pon la misma en Render → Environment y en el cliente) ===
+API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
+
+def require_api_key(f):
+    @wraps(f)
+    def wrap(*args, **kwargs):
+        if API_KEY and request.headers.get('X-API-Key') != API_KEY:
+            return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return wrap
 
 @app.get("/health")
 def health():
@@ -40,6 +57,7 @@ def read_image_fix_orientation(raw_bytes):
     return out.getvalue()
 
 @app.post("/mrz")
+@require_api_key
 def mrz():
     f = request.files.get('image')
     if not f:
@@ -47,11 +65,11 @@ def mrz():
 
     fixed = read_image_fix_orientation(f.read())
 
-    # Intento principal: Tesseract con OCRB
+    # Tesseract con OCRB
     mrz = read_mrz(io.BytesIO(fixed), save_roi=True,
                    extra_cmdline_params='--oem 3 --psm 6 -l ocrb')
     if mrz is None:
-        # Rectificación geométrica
+        # Rectificación geométrica si falló
         mrz = read_mrz(io.BytesIO(fixed), save_roi=True,
                        force_rectify=True,
                        extra_cmdline_params='--oem 3 --psm 6 -l ocrb')
@@ -68,6 +86,10 @@ def mrz():
         'nombres': d.get('names'),
         'sexo': (d.get('sex') or '').upper(),
         'nacimiento': normalize_date(d.get('date_of_birth')),
+        'expiracion': normalize_date(d.get('expiration_date')),
+        'raw': d.get('mrz_text')
+    })
+
         'expiracion': normalize_date(d.get('expiration_date')),
         'raw': d.get('mrz_text')
     })
