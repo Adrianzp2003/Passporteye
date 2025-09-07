@@ -4,6 +4,7 @@ scikit-image==0.22.0
 opencv-python-headless==4.9.0.80
 Pillow==10.3.0
 passporteye==2.2.2
+pytesseract==0.3.10
 flask==2.3.2
 flask-cors==4.0.0
 gunicorn==21.2.0
