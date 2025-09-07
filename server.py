@@ -9,7 +9,7 @@ import io, os, traceback, subprocess, pytesseract, re, unicodedata
 app = Flask(__name__)
 CORS(app, resources={ r"/": {"origins": "*"}, r"/mrz": {"origins": "*"}, r"/idocr": {"origins": "*"}})
 
-API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
+API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
 
 def require_api_key(f):
     @wraps(f)
@@ -33,7 +33,6 @@ def options_any():
     return make_response(("", 204))
 
 # ---------- Utilidades comunes ----------
-
 def get_tesseract_version():
     try:
         r = subprocess.run(["tesseract", "--version"], capture_output=True, text=True, timeout=5)
@@ -62,10 +61,7 @@ def enhance_text(img: Image.Image) -> Image.Image:
     return g
 
 def to_jpeg_bytes(img: Image.Image, quality: int = 92) -> bytes:
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=quality)
-    out.seek(0)
-    return out.getvalue()
+    out = io.BytesIO(); img.save(out, format="JPEG", quality=quality); out.seek(0); return out.getvalue()
 
 def ocr_image(img: Image.Image, lang="spa+eng", psm=6) -> str:
     proc = enhance_text(img)
@@ -80,15 +76,11 @@ def upclean(s: str) -> str:
     return re.sub(r"[^\w\s\-\(\)\/\.]", " ", deaccent(s or "").upper())
 
 def normalize_date_guess(datestr: str | None):
-    """
-    Acepta DD[./ -]MM[./ -]YYYY o DD[./ -]MM[./ -]YY (logica España: DD/MM/AAAA)
-    """
     if not datestr: return None
     m = re.search(r'(\d{1,2})[.\-\/ ](\d{1,2})[.\-\/ ](\d{2,4})', datestr)
     if not m: return None
     dd = int(m.group(1)); mm = int(m.group(2)); yy = int(m.group(3))
     if yy < 100:
-        # suponer siglo: si yy <= año actual % 100 → 2000+yy; si no → 1900+yy
         nowyy = date.today().year % 100
         yy = 2000 + yy if yy <= nowyy else 1900 + yy
     try:
@@ -96,21 +88,21 @@ def normalize_date_guess(datestr: str | None):
     except Exception:
         return None
 
-def smart_pick(*vals):
-    for v in vals:
-        if v and isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
+def normalize_date_mrz(yyMMdd: str | None):
+    if not yyMMdd or len(yyMMdd) != 6: return None
+    yy = int(yyMMdd[:2]); mm = yyMMdd[2:4]; dd = yyMMdd[4:6]
+    nowyy = date.today().year % 100
+    century = 2000 if yy <= nowyy else 1900
+    return f"{century + yy}-{mm}-{dd}"
 
-# ---------- MRZ (igual que antes, por si lo usas) ----------
-
+# ---------- MRZ util ----------
 def sanitize_line(s: str) -> str:
     return re.sub(r"[^A-Z0-9<]", "", (s or "").upper())
 
 def normalize_td1_line(line: str) -> str:
     s = sanitize_line(line)
     if len(s) > 30: s = s[:30]
-    if len(s) < 30: s = s + "<" * (30 - len(s))
+    if len(s) < 30: s = s + "<" * (30 - s.length)
     return s
 
 def ocr_bottom_mrz_lines_fast(img: Image.Image):
@@ -124,7 +116,7 @@ def ocr_bottom_mrz_lines_fast(img: Image.Image):
     txt = pytesseract.image_to_string(crop, config=cfg) or ""
     lines = [sanitize_line(l) for l in txt.splitlines() if l.strip()]
     if len(lines) > 3: lines = lines[-3:]
-    lines = [normalize_td1_line(l) for l in lines]
+    lines = [l[:30].ljust(30, '<') for l in lines]
     return lines, txt
 
 def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
@@ -133,7 +125,6 @@ def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
         mrz = read_mrz(io.BytesIO(bytes_jpg), save_roi=True, extra_cmdline_params=p)
         if mrz is not None:
             return mrz
-    # rotado 180
     img = Image.open(io.BytesIO(bytes_jpg))
     rot = img.rotate(180, expand=True)
     rb = to_jpeg_bytes(rot, 92)
@@ -142,6 +133,163 @@ def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
         if mrz is not None:
             return mrz
     return None
+
+# ---------- Provincias (para detectar residencia/provincia) ----------
+PROVINCIAS = {
+"ALAVA","ALBACETE","ALICANTE","ALMERIA","ASTURIAS","AVILA","BADAJOZ","BARCELONA","BURGOS","CACERES","CADIZ","CANTABRIA",
+"CASTELLON","CEUTA","CIUDAD REAL","CORDOBA","CUENCA","GIRONA","GRANADA","GUADALAJARA","GUIPUZCOA","HUELVA","HUESCA",
+"ILLES BALEARS","JAEN","LA CORUNA","A CORUNA","LA RIOJA","LAS PALMAS","LEON","LLEIDA","LUGO","MADRID","MALAGA","MELILLA",
+"MURCIA","NAVARRA","OURENSE","PALENCIA","PONTEVEDRA","SALAMANCA","SEGOVIA","SEVILLA","SORIA","TARRAGONA","SANTA CRUZ DE TENERIFE",
+"TERUEL","TOLEDO","VALENCIA","VALLADOLID","VIZCAYA","BIZKAIA","ZAMORA","ZARAGOZA","ALAVA","ARABA"
+}
+
+# ---------- Extracciones específicas DNI ----------
+LABEL_CUTS = ("LUGAR DE NACIMIENTO","LUGAR  DE  NACIMIENTO","LUGAR DE  NACIMIENTO","LUGAR  DE NACIMIENTO","LUGAR NACIMIENTO")
+
+def split_residence_section(back_text: str):
+    lines = [l for l in upclean(back_text).splitlines() if l.strip()]
+    idx = None
+    for i,l in enumerate(lines):
+        if any(tag in l for tag in LABEL_CUTS):
+            idx = i
+            break
+    res_lines = lines if idx is None else lines[:idx]
+    return res_lines
+
+ADDRESS_WORDS = r"(CALLE|CL|C\/|AVENIDA|AVDA|AVD|PLAZA|PZA|CAMINO|CMNO|CARRETERA|CTRA|CRTA|PGNO|POLIGONO|URBANIZACION|URB|BARRIO|RONDA|PASAJE|PJE|TRAVESIA|TRV)"
+CP_RE   = r"\b(\d{5})\b"
+DATE_RE = r"(\d{1,2}[.\-\/ ]\d{1,2}[.\-\/ ]\d{2,4})"
+
+def likely_address_line(u: str) -> bool:
+    if any(k in u for k in ["NACIONALIDAD","NOMBRE","APELLIDOS","DOCUMENTO","IDENTITY","CARD","NUM SOPORTE","SOPORTE","LUGAR","NACIMIENTO"]):
+        return False
+    if re.search(ADDRESS_WORDS, u): return True
+    if re.search(r"\d", u): return True
+    return (8 <= len(u) <= 45) and u == u.upper()
+
+def extract_address_residence(back_text: str):
+    res_lines = split_residence_section(back_text)
+    domicilio = None; cp=None; loc=None; prov=None
+
+    # 1) Domicilio (primeras 1-2 líneas que parecen dirección)
+    addr_lines = []
+    for l in res_lines:
+        u = l.strip()
+        if likely_address_line(u):
+            addr_lines.append(u)
+            if len(addr_lines) >= 2: break
+        elif addr_lines:
+            break
+    if addr_lines:
+        domicilio = " ".join(addr_lines)
+        domicilio = re.sub(r"\s{2,}", " ", domicilio).strip()
+
+    # 2) CP
+    joined = "\n".join(res_lines)
+    mcp = re.search(CP_RE, joined)
+    if mcp: cp = mcp.group(1)
+
+    # 3) Provincia y localidad (sólo en sección de residencia)
+    upp = [l for l in res_lines if l == l.upper() and '<' not in l]
+    # limpia líneas demasiado "vacías"
+    upp = [re.sub(r"\s{2,}", " ", l).strip() for l in upp if len(l.strip())>=3 and not re.search(r"\d", l)]
+    prov = next((l for l in upp if deaccent(l) in PROVINCIAS), None)
+    if prov:
+        # localidad: otra línea en mayúsculas distinta de la provincia
+        loc = next((l for l in upp if l != prov and deaccent(l) not in PROVINCIAS), None)
+
+    return domicilio, cp, loc, prov
+
+def extract_country(front_text: str, back_text: str, mrz_nat: str | None):
+    uf = upclean(front_text); ub = upclean(back_text)
+    # Prioriza NACIONALIDAD: ESP / FRA / ...
+    m = re.search(r"NACIONALIDAD[^A-Z0-9]{0,10}([A-Z]{3})", uf)
+    if m:
+        code = m.group(1)
+        return "ESPAÑA" if code == "ESP" else code
+    if mrz_nat:
+        return "ESPAÑA" if mrz_nat.upper()=="ESP" else mrz_nat.upper()
+    # Último recurso: España
+    return "ESPAÑA"
+
+def find_all_dates(text: str):
+    text = upclean(text)
+    return [normalize_date_guess(x) for x in re.findall(DATE_RE, text)]
+
+def parse_mrz_inline(back_text: str):
+    # Busca patrón de MRZ TD1 en texto OCR del reverso: YYMMDD[MF<]YYMMDD
+    u = re.sub(r"\s","", upclean(back_text))
+    m = re.search(r"(\d{6})[MF<](\d{6})", u)
+    if not m: return None, None
+    birth = normalize_date_mrz(m.group(1))
+    exp   = normalize_date_mrz(m.group(2))
+    return birth, exp
+
+def extract_dates(front_text: str, back_text: str):
+    # Usa anverso si tiene 2 fechas; si no, completa con MRZ del reverso
+    f_dates = [d for d in find_all_dates(front_text) if d]
+    birth_mrz, exp_mrz = parse_mrz_inline(back_text)
+    exped, validez = None, None
+
+    # Heurística: en el anverso suelen ir "EMISIÓN" y "VALIDEZ" la misma línea
+    if len(f_dates) >= 2:
+        # orden cronológico
+        f_dates_sorted = sorted(f_dates)
+        exped = f_dates_sorted[0]
+        validez = f_dates_sorted[-1]
+
+    if not validez and exp_mrz:
+        validez = exp_mrz
+
+    return exped, validez, birth_mrz
+
+# ---------- Endpoints ----------
+
+@app.post("/idocr")
+@require_api_key
+def idocr():
+    try:
+        f_front = request.files.get("front")
+        f_back  = request.files.get("back")
+        if not f_front or not f_back:
+            return jsonify({"ok": False, "error": 'Faltan archivos: front y back'}), 400
+
+        imgf = fix_orientation(f_front.read())
+        imgb = fix_orientation(f_back.read())
+
+        # OCR anverso/reverso
+        txt_front = ocr_image(imgf, lang="spa+eng", psm=6)
+        txt_back  = ocr_image(imgb, lang="spa+eng", psm=6)
+
+        # MRZ inline del reverso (para nacion./caducidad/nacimiento)
+        birth_mrz, exp_mrz = parse_mrz_inline(txt_back)
+
+        # Domicilio, CP, Localidad, Provincia (sólo sección residencia)
+        domicilio, cp, loc, prov = extract_address_residence(txt_back)
+
+        # Fechas (emisión / validez)
+        fecha_exp, fecha_val, birth_from_mrz = extract_dates(txt_front, txt_back)
+        if not fecha_val and exp_mrz:
+            fecha_val = exp_mrz
+
+        # País de residencia
+        pais_res = extract_country(txt_front, txt_back, "ESP")  # DNI español: ESP si no se deduce
+
+        return jsonify({
+            "ok": True,
+            "front_text": txt_front,
+            "back_text": txt_back,
+            "domicilio": domicilio,
+            "cp": cp,
+            "localidad": loc,
+            "provincia": prov,
+            "pais_residencia": pais_res,
+            "fecha_expedicion": fecha_exp,
+            "fecha_validez": fecha_val,
+            "nacimiento_mrz": birth_from_mrz or birth_mrz,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"EXCEPTION: {str(e)}", "trace": traceback.format_exc()[:2000]}), 500
 
 @app.post("/mrz")
 @require_api_key
@@ -183,7 +331,6 @@ def mrz():
         mrz_obj = try_read_mrz(to_jpeg_bytes(img, 92), psm_list=(6,7,11))
         d = mrz_obj.to_dict() if mrz_obj else {}
         raw_pe = d.get("mrz_text") or ""
-
         lines, ocr_raw = ([], "")
         if not raw_pe:
             lines, ocr_raw = ocr_bottom_mrz_lines_fast(img)
@@ -192,7 +339,7 @@ def mrz():
         optional_td1 = ""
         if raw:
             l1 = raw.splitlines()[0] if "\n" in raw else raw
-            l1 = normalize_td1_line(l1)
+            l1 = l1[:30].ljust(30,'<')
             optional_td1 = l1[15:30].replace("<","")
 
         return jsonify({
@@ -205,136 +352,13 @@ def mrz():
             "apellidos": d.get("surname"),
             "nombres": d.get("names"),
             "sexo": (d.get("sex") or "").upper(),
-            "nacimiento": normalize_date_guess(d.get("date_of_birth")),
-            "expiracion": normalize_date_guess(d.get("expiration_date")),
+            "nacimiento": normalize_date_mrz(d.get("date_of_birth")) if d.get("date_of_birth") else None,
+            "expiracion": normalize_date_mrz(d.get("expiration_date")) if d.get("expiration_date") else None,
             "optional": (d.get("personal_number") or d.get("optional_data") or ""),
             "raw": raw_pe,
             "raw_ocr": ocr_raw or raw,
             "mrz_lines": lines,
             "optional_td1": optional_td1,
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"EXCEPTION: {str(e)}", "trace": traceback.format_exc()[:2000]}), 500
-
-# ---------- ID OCR anverso + reverso ----------
-
-# Heurísticas de extracción
-CALLE_WORDS = r"(CALLE|CL|C\/|AVENIDA|AVDA|AVD|PLAZA|PZA|CAMINO|CMNO|CARRETERA|CTRA|PGNO|POLIGONO|URBANIZACION|URB|BARRIO|BJDA|RONDA)"
-LOC_WORDS   = r"(LOCALIDAD|MUNICIPIO|POBLACION|POBLACIÓN|CIUDAD|VILLA)"
-PROV_WORDS  = r"(PROVINCIA|PROV\.)"
-VALIDEZ_WORDS = r"(VALIDEZ|VALIDO HASTA|V[AÁ]LIDO HASTA|CADUCIDAD|EXPIRA|HASTA)"
-EXP_WORDS     = r"(EXPEDICION|EXPEDICI[OÓ]N|F\.? EXP\.?|EXP\.)"
-PAIS_WORDS    = r"(PAIS|PA[IÍ]S|NACIONALIDAD)"
-
-CP_RE   = r"\b(\d{5})\b"
-DATE_RE = r"(\d{1,2}[.\-\/ ]\d{1,2}[.\-\/ ]\d{2,4})"
-
-def extract_dates(txt_front: str, txt_back: str):
-    uf = upclean(txt_front); ub = upclean(txt_back)
-    # Validez
-    validez = None
-    for blob in [uf, ub]:
-        m1 = re.search(VALIDEZ_WORDS + r".{0,20}" + DATE_RE, blob)
-        m2 = re.search(DATE_RE + r".{0,20}" + VALIDEZ_WORDS, blob)
-        if m1 and not validez: validez = normalize_date_guess(m1.group(0))
-        if m2 and not validez: validez = normalize_date_guess(m2.group(0))
-    # Expedición
-    exped = None
-    for blob in [uf, ub]:
-        m1 = re.search(EXP_WORDS + r".{0,20}" + DATE_RE, blob)
-        m2 = re.search(DATE_RE + r".{0,20}" + EXP_WORDS, blob)
-        if m1 and not exped: exped = normalize_date_guess(m1.group(0))
-        if m2 and not exped: exped = normalize_date_guess(m2.group(0))
-    return exped, validez
-
-def extract_country(txt_front: str, txt_back: str):
-    for blob in [txt_back, txt_front]:
-        u = upclean(blob)
-        m = re.search(PAIS_WORDS + r".{0,20}([A-Z][A-Z \-]{2,})", u)
-        if m:
-            cand = m.group(2).strip()
-            # Limpiar posibles arrastres
-            cand = re.sub(r"[^A-Z \-]", "", cand).strip()
-            if cand: return cand
-    return "ESPANA"  # por defecto en DNIs españoles
-
-def extract_address(txt_back: str):
-    """
-    Intenta:
-    1) Buscar línea con DOMICILIO y leer 1-2 líneas debajo como dirección.
-    2) Buscar patrón de CP + localidad (+ provincia entre paréntesis).
-    3) Buscar línea que empiece con palabra de vía (CALLE, AVDA, etc.).
-    """
-    lines = [l for l in upclean(txt_back).splitlines() if l.strip()]
-    domicilio = None
-    cp = None
-    localidad = None
-    provincia = None
-
-    # 1) DOMICILIO
-    idx = next((i for i,l in enumerate(lines) if "DOMICILIO" in l or "DOM." in l), None)
-    if idx is not None:
-        # siguiente(s) líneas como dirección
-        cand = " ".join(lines[idx+1: idx+3]).strip()
-        if cand:
-            domicilio = cand
-
-    # 2) CP + Localidad (+ Provincia)
-    joined = "\n".join(lines)
-    mcp = re.search(CP_RE + r"\s+([A-ZÑÁÉÍÓÚÜ ]{2,})(?:\s*\(([^)]+)\))?", joined)
-    if mcp:
-        cp = mcp.group(1)
-        localidad = mcp.group(2).strip() if mcp.group(2) else None
-        provincia = mcp.group(3).strip() if len(mcp.groups())>=3 else None
-
-    # 3) Línea de vía
-    if not domicilio:
-        for l in lines:
-            if re.search(r"^" + CALLE_WORDS + r"\b", l):
-                domicilio = l.strip()
-                break
-
-    # Afinar: si domicilio está en mayúsculas "comidas" raras, poda repeticiones
-    if domicilio:
-        domicilio = re.sub(r"\s{2,}", " ", domicilio)
-        # Evita que incluya CP/LOCALIDAD si ya lo hemos separado
-        if cp:
-            domicilio = re.sub(CP_RE + r".+$", "", domicilio).strip()
-
-    return domicilio, cp, localidad, provincia
-
-@app.post("/idocr")
-@require_api_key
-def idocr():
-    try:
-        f_front = request.files.get("front")
-        f_back  = request.files.get("back")
-        if not f_front or not f_back:
-            return jsonify({"ok": False, "error": 'Faltan archivos: front y back'}), 400
-
-        imgf = fix_orientation(f_front.read())
-        imgb = fix_orientation(f_back.read())
-
-        # OCR rápido de ambas caras
-        txt_front = ocr_image(imgf, lang="spa+eng", psm=6)
-        txt_back  = ocr_image(imgb, lang="spa+eng", psm=6)
-
-        # Extracciones
-        fecha_exp, fecha_val = extract_dates(txt_front, txt_back)
-        pais_res = extract_country(txt_front, txt_back)
-        domicilio, cp, loc, prov = extract_address(txt_back)
-
-        return jsonify({
-            "ok": True,
-            "front_text": txt_front,
-            "back_text": txt_back,
-            "domicilio": domicilio,
-            "cp": cp,
-            "localidad": loc,
-            "provincia": prov,
-            "pais_residencia": pais_res,
-            "fecha_expedicion": fecha_exp,
-            "fecha_validez": fecha_val,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": f"EXCEPTION: {str(e)}", "trace": traceback.format_exc()[:2000]}), 500
