@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from passporteye import read_mrz
 from PIL import Image, ExifTags, ImageOps, ImageFilter
@@ -23,7 +23,7 @@ CORS(
 )
 
 # ==== API KEY: usa la misma en Render (Settings → Environment) ====
-API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
+API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
 
 
 def require_api_key(f):
@@ -32,13 +32,23 @@ def require_api_key(f):
         if API_KEY and request.headers.get("X-API-Key") != API_KEY:
             return jsonify({"ok": False, "error": "Unauthorized"}), 401
         return f(*args, **kwargs)
-
     return wrap
+
+
+@app.get("/")
+def index():
+    return {"ok": True, "service": "mrz", "tip": "POST /mrz con X-API-Key"}, 200
 
 
 @app.get("/health")
 def health():
     return {"ok": True, "service": "mrz"}, 200
+
+
+@app.route("/mrz", methods=["OPTIONS"])
+def mrz_options():
+    # Preflight CORS
+    return make_response(("", 204))
 
 
 def normalize_date(yyMMdd: str | None):
@@ -82,7 +92,7 @@ def to_jpeg_bytes(img: Image.Image, quality: int = 95) -> bytes:
 
 
 def enhance_for_mrz(img: Image.Image) -> Image.Image:
-    # boost para MRZ pequeña (DNI TD1)
+    # Boost para MRZ pequeña (DNI TD1)
     g = ImageOps.grayscale(img)
     g = ImageOps.autocontrast(g, cutoff=2)
     g = g.filter(ImageFilter.SHARPEN)
@@ -92,18 +102,14 @@ def enhance_for_mrz(img: Image.Image) -> Image.Image:
 def try_read_mrz(img_bytes: bytes, psm_list=(6, 7, 11), rectify_first: bool = False):
     tries = []
     for p in psm_list:
-        tries.append(
-            {"force_rectify": False, "params": f"--oem 3 --psm {p} -l ocrb"}
-        )
+        tries.append({"force_rectify": False, "params": f"--oem 3 --psm {p} -l ocrb"})
     for p in psm_list:
-        tries.append(
-            {"force_rectify": True, "params": f"--oem 3 --psm {p} -l ocrb"}
-        )
+        tries.append({"force_rectify": True, "params": f"--oem 3 --psm {p} -l ocrb"})
 
     if rectify_first:
         tries = sorted(tries, key=lambda t: not t["force_rectify"])
 
-    # normal
+    # Normal
     for t in tries:
         mrz = read_mrz(
             io.BytesIO(img_bytes),
@@ -114,7 +120,7 @@ def try_read_mrz(img_bytes: bytes, psm_list=(6, 7, 11), rectify_first: bool = Fa
         if mrz is not None:
             return mrz
 
-    # rotado 180º
+    # Rotado 180º
     img = Image.open(io.BytesIO(img_bytes))
     rot = img.rotate(180, expand=True)
     rot_b = to_jpeg_bytes(rot, 95)
@@ -146,7 +152,6 @@ def try_read_mrz_with_crops(img: Image.Image):
         y0 = int(h * y0f)
         y1 = int(h * y1f)
         crop = img.crop((int(w * 0.03), y0, int(w * 0.97), y1))
-        # escala
         scale = 1.6
         crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.BICUBIC)
         crop2 = enhance_for_mrz(crop)
@@ -177,8 +182,6 @@ def mrz():
         return jsonify({"ok": False, "error": "MRZ no detectada"}), 422
 
     d = mrz_obj.to_dict()
-
-    # === RESPUESTA EXTENDIDA (sin tabs, 4 espacios) ===
     return jsonify({
         "ok": True,
         "type": d.get("mrz_type"),               # TD1 o TD3
@@ -194,4 +197,3 @@ def mrz():
         "optional": (d.get("personal_number") or d.get("optional_data") or ""),
         "raw": d.get("mrz_text"),
     })
-
