@@ -4,30 +4,18 @@ from passporteye import read_mrz
 from PIL import Image, ExifTags, ImageOps, ImageFilter
 from datetime import date
 from functools import wraps
-import io
-import os
-import traceback
-import subprocess
+import io, os, traceback, subprocess, pytesseract, re
 
 app = Flask(__name__)
 
-# ==== CORS: AJUSTA a tus dominios ====
-CORS(
-    app,
-    resources={
-        r"/mrz": {
-            "origins": [
-                "https://pmsopalmo.campingsopalmo.com",
-                "https://campingsopalmo.com",
-            ]
-        }
-    },
-)
+# CORS: añade tus dominios
+CORS(app, resources={ r"/mrz": { "origins": [
+    "https://pmsopalmo.campingsopalmo.com",
+    "https://campingsopalmo.com",
+]}})
 
-# ==== API KEY: la misma en Render (Settings → Environment) ====
 API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
 
-# ==== Posibles rutas de tessdata (Dockerfile copia ocrb aquí) ====
 TESSDATA_DIRS = [
     "/usr/share/tesseract-ocr/4.00/tessdata",
     "/usr/share/tesseract-ocr/5/tessdata",
@@ -35,10 +23,10 @@ TESSDATA_DIRS = [
 
 def require_api_key(f):
     @wraps(f)
-    def wrap(*args, **kwargs):
+    def wrap(*a, **k):
         if API_KEY and request.headers.get("X-API-Key") != API_KEY:
             return jsonify({"ok": False, "error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+        return f(*a, **k)
     return wrap
 
 @app.get("/")
@@ -47,12 +35,7 @@ def index():
 
 @app.get("/health")
 def health():
-    langs = list_tess_langs()
-    return {
-        "ok": True,
-        "service": "mrz",
-        "has_ocrb": ("ocrb" in [l.lower() for l in langs]),
-    }, 200
+    return {"ok": True, "service": "mrz", "has_ocrb": ("ocrb" in [l.lower() for l in list_tess_langs()])}, 200
 
 @app.get("/diag")
 def diag():
@@ -66,7 +49,6 @@ def diag():
         "ocrb_present_in_dirs": exists,
         "langs": langs,
         "has_ocrb": ("ocrb" in [l.lower() for l in langs]),
-        "tip": "Debe aparecer 'ocrb' en langs y al menos un *.traineddata en las rutas",
     }, 200
 
 @app.route("/mrz", methods=["OPTIONS"])
@@ -83,16 +65,14 @@ def get_tesseract_version():
 def list_tess_langs():
     try:
         r = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
-            return []
+        if r.returncode != 0: return []
         lines = [ln.strip() for ln in r.stdout.splitlines()]
         return [ln for ln in lines if ln and not ln.lower().startswith("list of")]
     except Exception:
         return []
 
 def normalize_date(yyMMdd: str | None):
-    if not yyMMdd or len(yyMMdd) != 6:
-        return None
+    if not yyMMdd or len(yyMMdd) != 6: return None
     yy = int(yyMMdd[:2]); mm = yyMMdd[2:4]; dd = yyMMdd[4:6]
     nowyy = date.today().year % 100
     century = 2000 if yy <= nowyy else 1900
@@ -101,11 +81,7 @@ def normalize_date(yyMMdd: str | None):
 def fix_orientation(raw_bytes: bytes) -> Image.Image:
     img = Image.open(io.BytesIO(raw_bytes))
     try:
-        orientation_tag = None
-        for k, v in ExifTags.TAGS.items():
-            if v == "Orientation":
-                orientation_tag = k
-                break
+        orientation_tag = next((k for k,v in ExifTags.TAGS.items() if v=="Orientation"), None)
         exif = img._getexif() if hasattr(img, "_getexif") else None
         if exif and orientation_tag in exif:
             o = exif[orientation_tag]
@@ -117,10 +93,7 @@ def fix_orientation(raw_bytes: bytes) -> Image.Image:
     return img
 
 def to_jpeg_bytes(img: Image.Image, quality: int = 95) -> bytes:
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=quality)
-    out.seek(0)
-    return out.getvalue()
+    out = io.BytesIO(); img.save(out, format="JPEG", quality=quality); out.seek(0); return out.getvalue()
 
 def enhance_for_mrz(img: Image.Image) -> Image.Image:
     g = ImageOps.grayscale(img)
@@ -128,49 +101,46 @@ def enhance_for_mrz(img: Image.Image) -> Image.Image:
     g = g.filter(ImageFilter.SHARPEN)
     return g
 
-def try_read_mrz(img_bytes: bytes, psm_list=(6, 7, 11)):
+def sanitize_line(s: str) -> str:
+    return re.sub(r"[^A-Z0-9<]", "", (s or "").upper())
+
+def normalize_td1_line(line: str) -> str:
+    s = sanitize_line(line)
+    if len(s) > 30: s = s[:30]
+    if len(s) < 30: s = s + "<" * (30 - len(s))
+    return s
+
+def ocr_bottom_mrz_lines(img: Image.Image):
     """
-    Bucle de intentos con distintos PSMs y rotación 180º.
-    (PassportEye 2.2.2 no soporta 'force_rectify', así que no lo usamos.)
-    """
-    param_list = [f"--oem 3 --psm {p} -l ocrb" for p in psm_list]
-
-    # Normal
-    for params in param_list:
-        mrz = read_mrz(io.BytesIO(img_bytes), save_roi=True, extra_cmdline_params=params)
-        if mrz is not None:
-            return mrz
-
-    # Rotado 180º
-    img = Image.open(io.BytesIO(img_bytes))
-    rot = img.rotate(180, expand=True)
-    rot_b = to_jpeg_bytes(rot, 95)
-    for params in param_list:
-        mrz = read_mrz(io.BytesIO(rot_b), save_roi=True, extra_cmdline_params=params)
-        if mrz is not None:
-            return mrz
-
-    return None
-
-def try_read_mrz_with_crops(img: Image.Image):
-    """
-    Reintentos sobre recortes de la franja inferior (útil para DNI TD1),
-    con reescalado y mejora de contraste/enfoque.
+    Fallback OCR con Tesseract directamente en la franja inferior (MRZ).
+    Devuelve hasta 3 líneas 'limpias'.
     """
     w, h = img.size
-    bands = [
-        (0.50, 0.98),
-        (0.58, 0.98),
-        (0.65, 0.98),
-    ]
-    for (y0f, y1f) in bands:
-        y0 = int(h * y0f); y1 = int(h * y1f)
-        crop = img.crop((int(w * 0.03), y0, int(w * 0.97), y1))
-        scale = 1.6
-        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.BICUBIC)
-        crop2 = enhance_for_mrz(crop)
-        b = to_jpeg_bytes(crop2, 95)
-        mrz = try_read_mrz(b, psm_list=(6, 7, 11))
+    crop = img.crop((int(w*0.03), int(h*0.58), int(w*0.97), int(h*0.98)))
+    crop = crop.resize((int(crop.width*1.7), int(crop.height*1.7)), Image.BICUBIC)
+    crop = enhance_for_mrz(crop)
+
+    cfg = "--oem 3 --psm 6 -l ocrb -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+    txt = pytesseract.image_to_string(crop, config=cfg) or ""
+    lines = [sanitize_line(l) for l in txt.splitlines() if l.strip()]
+    # Nos quedamos con las últimas 3 líneas (generalmente son las MRZ)
+    if len(lines) > 3: lines = lines[-3:]
+    # Asegura longitud 30 para TD1
+    lines = [normalize_td1_line(l) for l in lines]
+    return lines, txt
+
+def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
+    params = [f"--oem 3 --psm {p} -l ocrb" for p in psm_list]
+    for p in params:
+        mrz = read_mrz(io.BytesIO(bytes_jpg), save_roi=True, extra_cmdline_params=p)
+        if mrz is not None:
+            return mrz
+    # rotado 180
+    img = Image.open(io.BytesIO(bytes_jpg))
+    rot = img.rotate(180, expand=True)
+    rb = to_jpeg_bytes(rot, 95)
+    for p in params:
+        mrz = read_mrz(io.BytesIO(rb), save_roi=True, extra_cmdline_params=p)
         if mrz is not None:
             return mrz
     return None
@@ -183,37 +153,43 @@ def mrz():
         if not f:
             return jsonify({"ok": False, "error": 'No file "image"'}), 400
 
-        # 1) Orientación correcta
         img = fix_orientation(f.read())
 
-        # 2) Intento directo (pasaporte TD3 y muchos TD1)
-        mrz_obj = try_read_mrz(to_jpeg_bytes(img, 95), psm_list=(6, 7, 11))
-        if mrz_obj is None:
-            # 3) Reintentos en franja inferior (DNI TD1)
-            mrz_obj = try_read_mrz_with_crops(img)
+        # 1) PassportEye
+        mrz_obj = try_read_mrz(to_jpeg_bytes(img, 95), psm_list=(6,7,11))
+        d = mrz_obj.to_dict() if mrz_obj else {}
 
-        if mrz_obj is None:
-            return jsonify({"ok": False, "error": "MRZ no detectada"}), 422
+        # 2) Fallback OCR si no hay texto MRZ
+        raw = d.get("mrz_text") or ""
+        ocr_lines, ocr_raw = ([], "")
+        if not raw:
+            ocr_lines, ocr_raw = ocr_bottom_mrz_lines(img)
+            raw = "\n".join(ocr_lines)
 
-        d = mrz_obj.to_dict()
+        # 3) Optional TD1 directamente desde la línea 1 si la tenemos
+        optional_td1 = ""
+        if raw:
+            l1 = raw.splitlines()[0] if "\n" in raw else raw
+            l1 = normalize_td1_line(l1)
+            optional_td1 = l1[15:30].replace("<","")
+
         return jsonify({
             "ok": True,
-            "type": d.get("mrz_type"),               # TD1 o TD3
-            "doc_code": d.get("type"),               # P/I (pasaporte/ID card)
-            "issuing_country": d.get("country"),     # país emisor (ej. ESP)
+            "type": d.get("mrz_type"),
+            "doc_code": d.get("type"),
+            "issuing_country": d.get("country"),
             "numero": d.get("number"),
             "nacionalidad": (d.get("nationality") or "").upper(),
             "apellidos": d.get("surname"),
             "nombres": d.get("names"),
-            "sexo": (d.get("sex") or "").upper(),    # M/F/X
+            "sexo": (d.get("sex") or "").upper(),
             "nacimiento": normalize_date(d.get("date_of_birth")),
             "expiracion": normalize_date(d.get("expiration_date")),
             "optional": (d.get("personal_number") or d.get("optional_data") or ""),
-            "raw": d.get("mrz_text"),
+            "raw": d.get("mrz_text") or "",         # lo que venga de PassportEye (si viene)
+            "raw_ocr": ocr_raw or raw,              # texto OCR crudo
+            "mrz_lines": ocr_lines,                 # líneas normalizadas (fallback)
+            "optional_td1": optional_td1,           # opcional derivado de l1 (fallback)
         })
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": f"EXCEPTION: {str(e)}",
-            "trace": traceback.format_exc()[:2000],
-        }), 500
+        return jsonify({"ok": False, "error": f"EXCEPTION: {str(e)}", "trace": traceback.format_exc()[:2000]}), 500
