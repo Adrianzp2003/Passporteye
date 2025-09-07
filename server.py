@@ -7,15 +7,12 @@ from functools import wraps
 import io, os, traceback, subprocess, pytesseract, re
 
 app = Flask(__name__)
-
-# CORS: añade tus dominios
 CORS(app, resources={ r"/mrz": { "origins": [
     "https://pmsopalmo.campingsopalmo.com",
     "https://campingsopalmo.com",
 ]}})
 
-API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
-
+API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
 TESSDATA_DIRS = [
     "/usr/share/tesseract-ocr/4.00/tessdata",
     "/usr/share/tesseract-ocr/5/tessdata",
@@ -31,7 +28,7 @@ def require_api_key(f):
 
 @app.get("/")
 def index():
-    return {"ok": True, "service": "mrz", "tip": "POST /mrz con X-API-Key"}, 200
+    return {"ok": True, "service": "mrz", "tip": "POST /mrz?fast=1 con X-API-Key"}, 200
 
 @app.get("/health")
 def health():
@@ -92,7 +89,7 @@ def fix_orientation(raw_bytes: bytes) -> Image.Image:
         pass
     return img
 
-def to_jpeg_bytes(img: Image.Image, quality: int = 95) -> bytes:
+def to_jpeg_bytes(img: Image.Image, quality: int = 92) -> bytes:
     out = io.BytesIO(); img.save(out, format="JPEG", quality=quality); out.seek(0); return out.getvalue()
 
 def enhance_for_mrz(img: Image.Image) -> Image.Image:
@@ -110,23 +107,25 @@ def normalize_td1_line(line: str) -> str:
     if len(s) < 30: s = s + "<" * (30 - len(s))
     return s
 
-def ocr_bottom_mrz_lines(img: Image.Image):
-    """
-    Fallback OCR con Tesseract directamente en la franja inferior (MRZ).
-    Devuelve hasta 3 líneas 'limpias'.
-    """
+def crop_bottom_band(img: Image.Image, top_frac=0.60, bottom_frac=0.98, margin_x=0.03) -> Image.Image:
     w, h = img.size
-    crop = img.crop((int(w*0.03), int(h*0.58), int(w*0.97), int(h*0.98)))
-    crop = crop.resize((int(crop.width*1.7), int(crop.height*1.7)), Image.BICUBIC)
-    crop = enhance_for_mrz(crop)
+    x0 = int(w*margin_x); x1 = int(w*(1-margin_x))
+    y0 = int(h*top_frac); y1 = int(h*bottom_frac)
+    crop = img.crop((x0, y0, x1, y1))
+    # escalar a ancho ~1200px para rapidez
+    target_w = 1200
+    if crop.width > target_w:
+        scale = target_w / crop.width
+        crop = crop.resize((int(crop.width*scale), int(crop.height*scale)), Image.BICUBIC)
+    return enhance_for_mrz(crop)
 
+def ocr_bottom_mrz_lines_fast(img: Image.Image):
+    crop = crop_bottom_band(img)
     cfg = "--oem 3 --psm 6 -l ocrb -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
     txt = pytesseract.image_to_string(crop, config=cfg) or ""
     lines = [sanitize_line(l) for l in txt.splitlines() if l.strip()]
-    # Nos quedamos con las últimas 3 líneas (generalmente son las MRZ)
     if len(lines) > 3: lines = lines[-3:]
-    # Asegura longitud 30 para TD1
-    lines = [normalize_td1_line(l) for l in lines]
+    lines = [normalize_td1_line(l) for l in lines]  # 30 chars
     return lines, txt
 
 def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
@@ -138,7 +137,7 @@ def try_read_mrz(bytes_jpg: bytes, psm_list=(6,7,11)):
     # rotado 180
     img = Image.open(io.BytesIO(bytes_jpg))
     rot = img.rotate(180, expand=True)
-    rb = to_jpeg_bytes(rot, 95)
+    rb = to_jpeg_bytes(rot, 92)
     for p in params:
         mrz = read_mrz(io.BytesIO(rb), save_roi=True, extra_cmdline_params=p)
         if mrz is not None:
@@ -154,19 +153,45 @@ def mrz():
             return jsonify({"ok": False, "error": 'No file "image"'}), 400
 
         img = fix_orientation(f.read())
+        fast = (request.args.get("fast", "1") == "1")
 
-        # 1) PassportEye
-        mrz_obj = try_read_mrz(to_jpeg_bytes(img, 95), psm_list=(6,7,11))
+        # ====== MODO RÁPIDO: solo OCR de franja MRZ ======
+        if fast:
+            lines, ocr_raw = ocr_bottom_mrz_lines_fast(img)
+            raw = "\n".join(lines)
+            optional_td1 = ""
+            if lines:
+                l1 = lines[0]
+                optional_td1 = l1[15:30].replace("<","")
+            return jsonify({
+                "ok": True,
+                "type": "TD1",                   # asumimos ID en modo rápido (la mayoría de DNIs)
+                "doc_code": "I",
+                "issuing_country": "",           # vacío en rápido
+                "numero": "",                    # vacío en rápido
+                "nacionalidad": "",
+                "apellidos": "",
+                "nombres": "",
+                "sexo": "",
+                "nacimiento": None,
+                "expiracion": None,
+                "optional": "",
+                "raw": "",                       # PassportEye no corrido
+                "raw_ocr": ocr_raw,
+                "mrz_lines": lines,
+                "optional_td1": optional_td1,
+            })
+
+        # ====== MODO COMPLETO (más lento): PassportEye + fallback OCR ======
+        mrz_obj = try_read_mrz(to_jpeg_bytes(img, 92), psm_list=(6,7,11))
         d = mrz_obj.to_dict() if mrz_obj else {}
+        raw_pe = d.get("mrz_text") or ""
 
-        # 2) Fallback OCR si no hay texto MRZ
-        raw = d.get("mrz_text") or ""
-        ocr_lines, ocr_raw = ([], "")
-        if not raw:
-            ocr_lines, ocr_raw = ocr_bottom_mrz_lines(img)
-            raw = "\n".join(ocr_lines)
+        lines, ocr_raw = ([], "")
+        if not raw_pe:
+            lines, ocr_raw = ocr_bottom_mrz_lines_fast(img)
 
-        # 3) Optional TD1 directamente desde la línea 1 si la tenemos
+        raw = raw_pe or "\n".join(lines)
         optional_td1 = ""
         if raw:
             l1 = raw.splitlines()[0] if "\n" in raw else raw
@@ -186,10 +211,10 @@ def mrz():
             "nacimiento": normalize_date(d.get("date_of_birth")),
             "expiracion": normalize_date(d.get("expiration_date")),
             "optional": (d.get("personal_number") or d.get("optional_data") or ""),
-            "raw": d.get("mrz_text") or "",         # lo que venga de PassportEye (si viene)
-            "raw_ocr": ocr_raw or raw,              # texto OCR crudo
-            "mrz_lines": ocr_lines,                 # líneas normalizadas (fallback)
-            "optional_td1": optional_td1,           # opcional derivado de l1 (fallback)
+            "raw": raw_pe,
+            "raw_ocr": ocr_raw or raw,
+            "mrz_lines": lines,
+            "optional_td1": optional_td1,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": f"EXCEPTION: {str(e)}", "trace": traceback.format_exc()[:2000]}), 500
