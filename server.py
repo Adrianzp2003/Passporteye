@@ -14,7 +14,7 @@ CORS(app, resources={ r"/mrz": { "origins": [
     "https://campingsopalmo.com",
 ]}})
 
-API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
+API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
 
 TESSDATA_DIRS = [
     "/usr/share/tesseract-ocr/4.00/tessdata",
