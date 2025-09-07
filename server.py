@@ -23,7 +23,7 @@ CORS(
 )
 
 # ==== API KEY: usa la misma en Render (Settings → Environment) ====
-API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
+API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
 
 
 def require_api_key(f):
