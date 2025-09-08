@@ -1,4 +1,9 @@
-Flask==3.0.3
-flask-cors==4.0.1
-passporteye==2.2.2
+numpy==1.26.4
+scipy==1.11.4
+scikit-image==0.22.0
+opencv-python-headless==4.9.0.80
 Pillow==10.3.0
+passporteye==2.2.2
+flask==2.3.2
+flask-cors==4.0.0
+gunicorn==21.2.0
