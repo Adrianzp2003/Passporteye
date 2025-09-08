@@ -9,7 +9,7 @@ import io, os, traceback, subprocess, pytesseract, re, unicodedata
 app = Flask(__name__)
 CORS(app, resources={ r"/": {"origins": "*"}, r"/mrz": {"origins": "*"}, r"/idocr": {"origins": "*"}})
 
-API_KEY = os.environ.get("MRZ_API_KEY", "CAMBIA_ESTA_CLAVE")
+API_KEY = os.environ.get("MRZ_API_KEY", "pirulico22")
 
 LANGS_ID = "eng+spa+fra+deu+ita+por+nld"  # multi-país UE
 TESS_MRZ_CONFIG = "--oem 3 --psm 6 -l eng -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
